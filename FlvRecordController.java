@@ -11,7 +11,6 @@ import static com.laifeng.sopcastsdk.stream.packer.flv.FlvPackerHelper.VIDEO_HEA
 import static com.laifeng.sopcastsdk.stream.packer.flv.FlvPackerHelper.VIDEO_SPECIFIC_CONFIG_EXTEND_SIZE;
 
 import android.annotation.SuppressLint;
-import android.content.Context;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 
@@ -23,12 +22,10 @@ import com.laifeng.sopcastsdk.stream.packer.flv.FlvPackerHelper;
 import com.pedro.rtplibrary.base.recording.BaseRecordController;
 
 import java.io.FileDescriptor;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.LinkedList;
-import java.util.concurrent.Executors;
+
 
 public class FlvRecordController extends BaseRecordController implements AnnexbHelper.AnnexbNaluListener {
 

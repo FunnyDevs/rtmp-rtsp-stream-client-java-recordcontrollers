@@ -94,7 +94,6 @@ public class XugglerRecordController extends BaseRecordController {
       container = IContainer.make();
       container.open(outputUrl, IContainer.Type.WRITE, format);
       container.setStandardsCompliance(IStreamCoder.CodecStandardsCompliance.COMPLIANCE_STRICT);
-//        container.setProperty("thread", 2);
         container.setProperty("movflags", "frag_keyframe+empty_moov+faststart");
 
       ICodec videoCodec = ICodec.findEncodingCodec(ICodec.ID.AV_CODEC_ID_H264);
@@ -207,10 +206,6 @@ public class XugglerRecordController extends BaseRecordController {
 
 
    public void write(int track, ByteBuffer byteBuffer, MediaCodec.BufferInfo info) {
-//        byte[] originalData = new byte[byteBuffer.remaining()];
-//        byteBuffer.get(originalData);
-
-
       IPacket packet = IPacket.make();
 
       packet.setData(IBuffer.make(null, byteBuffer, 0, info.size));
@@ -221,9 +216,6 @@ public class XugglerRecordController extends BaseRecordController {
 
       if (packet.isComplete()) {
          queue.offer(packet);
-//            container.writePacket(packet);
-//            packet = null;
-//            container.flushPackets();
       }
 
 
@@ -237,10 +229,6 @@ public class XugglerRecordController extends BaseRecordController {
       pauseMoment = 0;
       pauseTime = 0;
       if (listener != null) listener.onStatusChange(status);
-//        container.writeTrailer();
-//        audioEncoder.close();
-//        videoEncoder.close();
-//        container.close();
    }
 
 
