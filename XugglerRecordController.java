@@ -4,7 +4,6 @@ package com.pedro.rtpstreamer;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.net.Uri;
-import android.os.Process;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -19,218 +18,204 @@ import com.xuggle.xuggler.IPacket;
 import com.xuggle.xuggler.IPixelFormat;
 import com.xuggle.xuggler.IRational;
 import com.xuggle.xuggler.IStreamCoder;
-import com.xuggle.xuggler.io.XugglerIO;
 
 import java.io.FileDescriptor;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.PipedInputStream;
-import java.io.PipedOutputStream;
 import java.nio.ByteBuffer;
-import java.util.concurrent.CompletionService;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 
 public class XugglerRecordController extends BaseRecordController {
 
-   private IContainer container;
-   private IStreamCoder videoEncoder;
-   private IStreamCoder audioEncoder;
-   private IRational timebase = IRational.make(1, 1000 * 1000);
-   private String outputUrl;
-   private int audioSampleRate;
-   private int audioBitrate;
-   private int channels;
-   private int videoBitrate;
-   private int width;
-   private int height;
-   private IContainerFormat format = IContainerFormat.make();
-   private CompletionService<Void> exececutor = new ExecutorCompletionService(
-           Executors.newSingleThreadExecutor(runnable -> {
-              Thread thread = new Thread(runnable);
-              Process.setThreadPriority(Process.THREAD_PRIORITY_MORE_FAVORABLE);
-              return thread;
-           })
-   );
-   private ConcurrentLinkedQueue queue = new ConcurrentLinkedQueue<IPacket>();
+    private IContainer container;
+    private IStreamCoder videoEncoder;
+    private IStreamCoder audioEncoder;
+    private IRational timebase = IRational.make(1, 1000 * 1000);
+    private IContainerFormat format = IContainerFormat.make();
+    private ConcurrentLinkedQueue queue = new ConcurrentLinkedQueue<IPacket>();
 
+    private String outputUrl;
+    private CountDownLatch semaphore;
+    private boolean isOnlyVideo;
+    private boolean isOnlyAudio;
 
-   private PipedInputStream pipedInputStream;
-   private PipedOutputStream pipedOutputStream;
-   private FileOutputStream fileOutputStream;
+    public XugglerRecordController() {
+        format.setOutputFormat("mp4", null, null);
+    }
 
-   public XugglerRecordController(int width, int height, int videoBitrate,
-                                  int audioSampleRate, int audioBitrate, int channels) {
-      this.width = height;
-      this.height = width;
-      this.videoBitrate = videoBitrate;
-      this.audioSampleRate = audioSampleRate;
-      this.audioBitrate = audioBitrate;
-      this.channels = channels;
-      format.setOutputFormat("mp4", null, null);
-   }
+    @Override
+    public void startRecord(@NonNull String path, @Nullable Listener listener) throws IOException {
+        outputUrl = path;
 
-   @Override
-   public void startRecord(@NonNull String path, @Nullable Listener listener) throws IOException {
-      pipedInputStream = new PipedInputStream();
-      pipedOutputStream = new PipedOutputStream(pipedInputStream);
-      fileOutputStream = new FileOutputStream(path);
-      outputUrl = Uri.parse(XugglerIO.map(pipedOutputStream)).toString();
-      outputUrl = path;
-      status = Status.STARTED;
-      if (listener != null)
-         listener.onStatusChange(status);
-      init();
-   }
-
-   @Override
-   public void startRecord(@NonNull FileDescriptor fd, @Nullable Listener listener) throws IOException {
-      throw new IOException("NON IMPLEMENTED");
-   }
-
-
-   public void init() {
-      container = IContainer.make();
-      container.open(outputUrl, IContainer.Type.WRITE, format);
-      container.setStandardsCompliance(IStreamCoder.CodecStandardsCompliance.COMPLIANCE_STRICT);
+        semaphore = new CountDownLatch(1);
+        container = IContainer.make();
+        container.open(outputUrl, IContainer.Type.WRITE, format);
+        container.setStandardsCompliance(IStreamCoder.CodecStandardsCompliance.COMPLIANCE_STRICT);
         container.setProperty("movflags", "frag_keyframe+empty_moov+faststart");
 
-      ICodec videoCodec = ICodec.findEncodingCodec(ICodec.ID.AV_CODEC_ID_H264);
-      videoEncoder = IStreamCoder.make(IStreamCoder.Direction.ENCODING, videoCodec);
-      container.addNewStream(videoEncoder);
-      videoEncoder.setBitRate(videoBitrate);
-      videoEncoder.setPixelType(IPixelFormat.Type.YUV420P);
-      videoEncoder.setHeight(height);
-      videoEncoder.setWidth(width);
-      videoEncoder.setNumPicturesInGroupOfPictures(60);
-      IRational frameRate = IRational.make(1, 30);
-      videoEncoder.setFrameRate(frameRate);
-      videoEncoder.setTimeBase(timebase);
-      videoTrack = 0;
-      videoEncoder.open();
+        status = Status.STARTED;
+        if (listener != null)
+            listener.onStatusChange(status);
+    }
 
-      ICodec audioCodec = ICodec.findEncodingCodec(ICodec.ID.AV_CODEC_ID_AAC);
-      audioEncoder = IStreamCoder.make(IStreamCoder.Direction.ENCODING, audioCodec);
-      container.addNewStream(audioEncoder);
-      audioEncoder.setSampleRate(audioSampleRate);
-      audioEncoder.setSampleFormat(IAudioSamples.Format.FMT_FLTP);
-      audioEncoder.setTimeBase(timebase);
-      audioEncoder.setBitRate(audioBitrate);
-      audioEncoder.setChannels(channels);
-      audioEncoder.setProperty("ch_mode", "indep");
-      audioTrack = 1;
-      audioEncoder.open();
+    @Override
+    public void startRecord(@NonNull FileDescriptor fd, @Nullable Listener listener) throws IOException {
+        throw new IOException("NON IMPLEMENTED");
+    }
 
-      container.writeHeader();
 
-      status = Status.RECORDING;
-      if (listener != null) listener.onStatusChange(status);
+    private void initRecording() {
 
-      Executors.newSingleThreadExecutor().execute(() -> {
-         try{
-            byte[] buffer = new byte[4096];
+        status = Status.RECORDING;
+        if (listener != null)
+            listener.onStatusChange(status);
+
+        Executors.newSingleThreadExecutor().execute(() -> {
             while (status == Status.RECORDING) {
-               int read = 0;
-               while ((read = pipedInputStream.read(buffer)) != -1) {
-                  fileOutputStream.write(buffer, 0, read);
-               }
+                IPacket packet = (IPacket) queue.poll();
+                if (packet != null)
+                    container.writePacket(packet);
             }
-         }
-         catch (Throwable t){
 
-         }
-      });
+            try {
+                container.writeTrailer();
+                audioEncoder.close();
+                videoEncoder.close();
+                container.close();
+            } catch (Exception t) {
+                t.printStackTrace();
+            }
+        });
+    }
 
 
-      exececutor.submit(() -> {
-         while (status == Status.RECORDING) {
-            IPacket packet = (IPacket) queue.poll();
-            if (packet != null)
-               container.writePacket(packet);
-         }
+    @Override
+    public void recordVideo(ByteBuffer videoBuffer, MediaCodec.BufferInfo videoInfo) {
 
-         try {
-            container.writeTrailer();
-            audioEncoder.close();
-            videoEncoder.close();
-            container.close();
-         } catch (Exception t) {
+        try {
+            if (!isRecorderConfigured())
+                semaphore.await();
+
+            if (!container.isHeaderWritten()) {
+                container.writeHeader();
+                initRecording();
+            }
+
+
+            if (status == Status.RECORDING) {
+                updateFormat(this.videoInfo, videoInfo);
+                write(videoTrack, videoBuffer, this.videoInfo);
+            }
+
+        } catch (Throwable t) {
             t.printStackTrace();
-         }
+        }
 
-      }, null);
+    }
 
-   }
-
-   @Override
-   public void recordVideo(ByteBuffer videoBuffer, MediaCodec.BufferInfo videoInfo) {
-      if (status == Status.RESUMED && (videoInfo.flags == MediaCodec.BUFFER_FLAG_KEY_FRAME
-              || isKeyFrame(videoBuffer))) {
-         status = Status.RECORDING;
-         if (listener != null) listener.onStatusChange(status);
-      }
-
-      if (status == Status.RECORDING) {
-
-         updateFormat(this.videoInfo, videoInfo);
-         write(videoTrack, videoBuffer, this.videoInfo);
-      }
-   }
-
-   @Override
-   public void recordAudio(ByteBuffer audioBuffer, MediaCodec.BufferInfo audioInfo) {
-      if (status == Status.RECORDING) {
-         if (videoInfo.flags == MediaCodec.BUFFER_FLAG_KEY_FRAME)
-            return;
-
-         updateFormat(this.audioInfo, audioInfo);
-         write(audioTrack, audioBuffer, this.audioInfo);
-      }
-   }
-
-   @Override
-   public void setVideoFormat(MediaFormat videoFormat, boolean isOnlyVideo) {
-
-   }
-
-   @Override
-   public void setAudioFormat(MediaFormat audioFormat, boolean isOnlyVideo) {
-
-   }
-
-   @Override
-   public void resetFormats() {
-
-   }
+    @Override
+    public void recordAudio(ByteBuffer audioBuffer, MediaCodec.BufferInfo audioInfo) {
+        if (isOnlyAudio && !container.isHeaderWritten()) {
+            container.writeHeader();
+            initRecording();
+        }
 
 
-   public void write(int track, ByteBuffer byteBuffer, MediaCodec.BufferInfo info) {
-      IPacket packet = IPacket.make();
+        if (status == Status.RECORDING) {
+            updateFormat(this.audioInfo, audioInfo);
+            write(audioTrack, audioBuffer, this.audioInfo);
+        }
+    }
 
-      packet.setData(IBuffer.make(null, byteBuffer, 0, info.size));
-      packet.setTimeStamp(info.presentationTimeUs);
-      packet.setTimeBase(timebase);
-      packet.setStreamIndex(track);
+    @Override
+    public void setVideoFormat(MediaFormat videoFormat, boolean isOnlyVideo) {
+        ICodec videoCodec = ICodec.findEncodingCodec(ICodec.ID.AV_CODEC_ID_H264);
+        videoEncoder = IStreamCoder.make(IStreamCoder.Direction.ENCODING, videoCodec);
+        container.addNewStream(videoEncoder);
+        videoEncoder.setBitRate(videoFormat.getInteger(MediaFormat.KEY_BIT_RATE));
+        videoEncoder.setPixelType(IPixelFormat.Type.YUV420P);
+        videoEncoder.setHeight(videoFormat.getInteger(MediaFormat.KEY_WIDTH));
+        videoEncoder.setWidth(videoFormat.getInteger(MediaFormat.KEY_HEIGHT));
+        videoEncoder.setNumPicturesInGroupOfPictures(videoFormat.getInteger(MediaFormat.KEY_FRAME_RATE));
+        IRational frameRate = IRational.make(1, videoFormat.getInteger(MediaFormat.KEY_FRAME_RATE));
+        videoEncoder.setFrameRate(frameRate);
+        videoEncoder.setTimeBase(timebase);
+        videoTrack = 0;
+        videoEncoder.open();
+        this.isOnlyVideo = isOnlyVideo;
+        checkTracksConfiguration();
+    }
+
+    @Override
+    public void setAudioFormat(MediaFormat audioFormat, boolean isOnlyAudio) {
+        ICodec audioCodec = ICodec.findEncodingCodec(ICodec.ID.AV_CODEC_ID_AAC);
+        audioEncoder = IStreamCoder.make(IStreamCoder.Direction.ENCODING, audioCodec);
+        container.addNewStream(audioEncoder);
+        audioEncoder.setSampleRate(audioFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE));
+        audioEncoder.setSampleFormat(IAudioSamples.Format.FMT_FLTP);
+        audioEncoder.setTimeBase(timebase);
+        audioEncoder.setBitRate(audioFormat.getInteger(MediaFormat.KEY_BIT_RATE));
+        audioEncoder.setChannels(audioFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT));
+        audioEncoder.setProperty("ch_mode", "indep");
+        if (isOnlyAudio)
+            audioTrack = 0;
+        else
+            audioTrack = 1;
+        audioEncoder.open();
+        this.isOnlyAudio = isOnlyAudio;
+        checkTracksConfiguration();
+    }
+
+    private boolean isRecorderConfigured() {
+        return isOnlyAudio && audioTrack != -1 || isOnlyVideo && videoTrack != -1 ||
+                audioTrack != -1 && videoTrack != -1;
+    }
 
 
-      if (packet.isComplete()) {
-         queue.offer(packet);
-      }
+    private void checkTracksConfiguration() {
+        if (isRecorderConfigured())
+            semaphore.countDown();
+    }
+
+    @Override
+    public void resetFormats() {
+
+    }
 
 
+    public synchronized void write(int track, ByteBuffer byteBuffer, MediaCodec.BufferInfo info) {
+        if (!container.isHeaderWritten())
+            container.writeHeader();
 
-   }
+        IPacket packet = IPacket.make();
+
+        byte[] bytesArray = new byte[byteBuffer.remaining()];
+        byteBuffer.get(bytesArray, 0, bytesArray.length);
+
+        packet.setData(IBuffer.make(null, bytesArray, 0, info.size));
+        packet.setTimeStamp(info.presentationTimeUs);
+        packet.setTimeBase(timebase);
+        packet.setStreamIndex(track);
+
+        if (packet.isComplete())
+            queue.offer(packet);
+
+    }
 
 
-   @Override
-   public void stopRecord() {
-      status = Status.STOPPED;
-      pauseMoment = 0;
-      pauseTime = 0;
-      if (listener != null) listener.onStatusChange(status);
-   }
+    @Override
+    public void stopRecord() {
+        status = Status.STOPPED;
+        pauseMoment = 0;
+        isOnlyAudio = false;
+        isOnlyVideo = false;
+        audioTrack = -1;
+        videoTrack = -1;
+        pauseTime = 0;
+        if (listener != null)
+            listener.onStatusChange(status);
+    }
 
 
 }
-

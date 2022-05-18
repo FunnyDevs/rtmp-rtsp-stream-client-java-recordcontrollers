@@ -19,6 +19,7 @@ import androidx.annotation.Nullable;
 
 import com.laifeng.sopcastsdk.stream.packer.AnnexbHelper;
 import com.laifeng.sopcastsdk.stream.packer.flv.FlvPackerHelper;
+import com.pedro.encoder.input.audio.MicrophoneManager;
 import com.pedro.rtplibrary.base.recording.BaseRecordController;
 
 import java.io.FileDescriptor;
@@ -36,36 +37,34 @@ public class FlvRecordController extends BaseRecordController implements AnnexbH
     private int audioSampleRate, audioSampleSize;
     private boolean isStereo;
 
-    private AnnexbHelper mAnnexbHelper;
-    private boolean isPrerecording;
+    private AnnexbHelper annexbHelper;
     private FileOutputStream outputStream;
 
     private int videoTrack = 0;
     private int audioTrack = 1;
 
+    private boolean audioTrackConfigured;
+    private boolean videoTrackConfigured;
+    private boolean isOnlyVideo;
+    private boolean isOnlyAudio;
 
+    public FlvRecordController() {
 
-    public FlvRecordController(int videoWidth, int videoHeight, int videoFps,
-                               int audioSampleRate, int audioSampleSize, boolean isStereo){
-        this.videoFps = videoFps;
-        this.videoHeight = videoHeight;
-        this.videoWidth = videoWidth;
-        this.audioSampleRate = audioSampleRate;
-        this.audioSampleSize = audioSampleSize;
-        this.isStereo = isStereo;
     }
 
 
-    public void init() {
+    public void startRecording() {
         status = Status.RECORDING;
+        if (listener != null)
+            listener.onStatusChange(status);
     }
 
     @Override
     public void startRecord(@NonNull String path, @Nullable Listener listener) throws IOException {
-        mAnnexbHelper = new AnnexbHelper();
-        mAnnexbHelper.setAnnexbNaluListener(this);
+        annexbHelper = new AnnexbHelper();
+        annexbHelper.setAnnexbNaluListener(this);
         outputStream = new FileOutputStream(path);
-        init();
+        status = Status.STARTED;
     }
 
     @Override
@@ -75,44 +74,69 @@ public class FlvRecordController extends BaseRecordController implements AnnexbH
 
     @Override
     public void recordVideo(ByteBuffer videoBuffer, MediaCodec.BufferInfo videoInfo) {
-        mAnnexbHelper.analyseVideoData(videoBuffer,videoInfo);
+        annexbHelper.analyseVideoData(videoBuffer, videoInfo);
     }
 
     @SuppressLint("WrongConstant")
     @Override
     public void onVideo(byte[] video, boolean isKeyFrame) {
-        if(!isHeaderWrite) {
-            return;
+        if (status == Status.RECORDING) {
+
+            if (!isHeaderWrite)
+                return;
+
+
+            MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+            bufferInfo.size = video.length;
+            if (isKeyFrame)
+                bufferInfo.flags = MediaCodec.BUFFER_FLAG_KEY_FRAME;
+
+            write(videoTrack, ByteBuffer.wrap(video), bufferInfo);
         }
 
-
-        MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
-        bufferInfo.size = video.length;
-        if (isKeyFrame)
-            bufferInfo.flags = MediaCodec.BUFFER_FLAG_KEY_FRAME;
-
-        write(videoTrack,ByteBuffer.wrap(video),bufferInfo);
 
     }
 
     @Override
     public void recordAudio(ByteBuffer bb, MediaCodec.BufferInfo bi) {
-        if(!isHeaderWrite || !isKeyFrameWrite) {
-            return;
-        }
+        if (isOnlyAudio && !isHeaderWrite)
+            writeFirstData(null, null);
 
-        write(audioTrack,bb,bi);
+        if (status == Status.RECORDING) {
+
+            if ((!isHeaderWrite || !isKeyFrameWrite) && !isOnlyAudio)
+                return;
+
+            write(audioTrack, bb, bi);
+        }
 
     }
 
     @Override
     public void setVideoFormat(MediaFormat videoFormat, boolean isOnlyVideo) {
-
+        this.videoWidth = videoFormat.getInteger(MediaFormat.KEY_WIDTH);
+        this.videoHeight = videoFormat.getInteger(MediaFormat.KEY_HEIGHT);
+        this.videoFps = videoFormat.getInteger(MediaFormat.KEY_FRAME_RATE);
+        this.videoTrackConfigured = true;
+        this.isOnlyVideo = isOnlyVideo;
+        checkTracksConfiguration();
     }
 
     @Override
-    public void setAudioFormat(MediaFormat audioFormat, boolean isOnlyVideo) {
+    public void setAudioFormat(MediaFormat audioFormat, boolean isOnlyAudio) {
+        this.audioSampleRate = audioFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+        this.audioSampleSize = new MicrophoneManager(null).getMaxInputSize();
+        this.isStereo = audioFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT) > 1;
+        this.isOnlyAudio = isOnlyAudio;
+        this.audioTrackConfigured = true;
+        checkTracksConfiguration();
+    }
 
+    private void checkTracksConfiguration() {
+        if (isOnlyAudio && audioTrackConfigured || isOnlyVideo && videoTrackConfigured ||
+                videoTrackConfigured && audioTrackConfigured
+        )
+            startRecording();
     }
 
     @Override
@@ -127,9 +151,9 @@ public class FlvRecordController extends BaseRecordController implements AnnexbH
             long timestamp = System.currentTimeMillis() - startTime;
             info.presentationTimeUs = timestamp;
             if (track == audioTrack)
-                outputStream.write(prepareAudioData(byteBuffer,info).array());
-            else{
-                ByteBuffer data = prepareVideoData(byteBuffer,info);
+                outputStream.write(prepareAudioData(byteBuffer, info).array());
+            else {
+                ByteBuffer data = prepareVideoData(byteBuffer, info);
                 if (data != null)
                     outputStream.write(data.array());
             }
@@ -143,24 +167,29 @@ public class FlvRecordController extends BaseRecordController implements AnnexbH
 
     @Override
     public void onSpsPps(byte[] sps, byte[] pps) {
+        writeFirstData(sps, pps);
+    }
+
+    private void writeFirstData(byte[] sps, byte[] pps) {
         writeFlvHeader();
         writeMetaData();
-        writeFirstVideoTag(sps, pps);
-        writeFirstAudioTag();
+        if (sps != null && pps != null || !isOnlyAudio)
+            writeFirstVideoTag(sps, pps);
+        if (!isOnlyVideo)
+            writeFirstAudioTag();
         startTime = System.currentTimeMillis();
         isHeaderWrite = true;
     }
 
 
-
-    private ByteBuffer prepareVideoData(ByteBuffer byteBuffer, MediaCodec.BufferInfo info){
+    private ByteBuffer prepareVideoData(ByteBuffer byteBuffer, MediaCodec.BufferInfo info) {
         boolean isKeyFrame = info.flags == MediaCodec.BUFFER_FLAG_KEY_FRAME;
         int packetType = INTER_FRAME;
-        if(isKeyFrame) {
+        if (isKeyFrame) {
             isKeyFrameWrite = true;
             packetType = KEY_FRAME;
         }
-        if(!isKeyFrameWrite) {
+        if (!isKeyFrameWrite) {
             return null;
         }
 
@@ -175,7 +204,7 @@ public class FlvRecordController extends BaseRecordController implements AnnexbH
         return buffer;
     }
 
-    private ByteBuffer prepareAudioData(ByteBuffer byteBuffer, MediaCodec.BufferInfo info){
+    private ByteBuffer prepareAudioData(ByteBuffer byteBuffer, MediaCodec.BufferInfo info) {
         byteBuffer.position(info.offset);
         byteBuffer.limit(info.offset + info.size);
         byte[] audio = new byte[info.size];
@@ -203,8 +232,6 @@ public class FlvRecordController extends BaseRecordController implements AnnexbH
             e.printStackTrace();
         }
     }
-
-
 
 
     private void writeFlvHeader() {
@@ -272,23 +299,4 @@ public class FlvRecordController extends BaseRecordController implements AnnexbH
 
     }
 
-    public boolean isPrerecording() {
-        return isPrerecording;
-    }
-
-    public void setPrerecording(boolean prerecording) {
-        isPrerecording = prerecording;
-    }
-
-    private class Packet{
-        private ByteBuffer data;
-        private int track;
-        private MediaCodec.BufferInfo info;
-
-        public Packet(ByteBuffer data, int track, MediaCodec.BufferInfo info){
-            this.data = data;
-            this.track = track;
-            this.info = info;
-        }
-    }
 }
